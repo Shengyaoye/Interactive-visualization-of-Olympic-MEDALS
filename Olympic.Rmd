@@ -1,0 +1,1305 @@
+---
+title: "m2"
+author: "Ani Shi"
+date: "2024-10-24"
+output: html_document
+---
+
+---
+title: "Olympic Data Visualization"
+output: html_document
+date: "2024-10-21"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Package
+```{r package}
+library(viridisLite)
+library(shinythemes)
+library(shiny)
+library(tidyverse)
+library(ggridges)
+library(DT)
+library(plotly)
+library(dplyr)
+library(ggplot2)
+library(magrittr)
+library(ggraph)
+library(tidygraph)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf)
+```
+
+# Data clean
+```{r data_cleaning}
+#analtsis部分的数据
+olympics_dataana <- read.csv("https://uwmadison.box.com/shared/static/2zdwaepvv0p3i28e3bng4x7o8j4uvznq.csv")
+olympics_dataana2<- read.csv('https://uwmadison.box.com/shared/static/v8dhgguandpl2yufzljlz0qqnz30q6yr.csv')
+olympics_dataana$Event <- mapply(function(sport, event) {
+  gsub(paste0("^", sport, " "), "", event, ignore.case = TRUE)
+}, olympics_dataana$Sport, olympics_dataana$Event)
+olympics_dataana2$Event <- mapply(function(sport, event) {
+  gsub(paste0("^", sport, " "), "", event, ignore.case = TRUE)
+}, olympics_dataana2$Sport, olympics_dataana2$Event)
+olympics_dataana2<- olympics_dataana2|>
+   mutate(Medal = ifelse(is.na(Medal), "No Medal", Medal))  # 将 NA 转换为 "No Medal"
+
+# 删除 playerID 和 name 列
+olympics_dataana <- olympics_dataana[ , !(names(olympics_dataana) %in% c("player_id", "Name",'Sex'))]
+# 删除重复的行
+olympics_dataana <- olympics_dataana[!duplicated(olympics_dataana), ]
+olympics_dataana <- olympics_dataana|>
+  filter(Medal != "No medal")
+
+#summarise部分的数据
+olympics_data <- read.csv("https://uwmadison.box.com/shared/static/2zdwaepvv0p3i28e3bng4x7o8j4uvznq.csv")
+olympics_data$Event <- mapply(function(sport, event) {
+  gsub(paste0("^", sport, " "), "", event, ignore.case = TRUE)
+}, olympics_data$Sport, olympics_data$Event)
+
+
+# 创建一个新的数据集用于处理奖牌数据
+olympics_medal_data <- olympics_data
+
+# 删除"No medal"的行,名字”这一列,完全重复的行
+olympics_medal_data <- olympics_medal_data[olympics_medal_data$Medal != "No medal", ]
+olympics_medal_data <- olympics_medal_data[ , !(names(olympics_medal_data) %in% c("Name"))]
+olympics_medal_data <- olympics_medal_data[!duplicated(olympics_medal_data), ]
+
+# clean the olympics_data set
+olympics_data <- olympics_data[olympics_data$Medal != "No medal", ]
+```
+
+# Dynamic chart function
+```{r dynamic_plots}
+# 函数：生成世界地图数据并绘制
+generate_world_map <- function(df) {
+  # 按国家汇总奖牌总数
+  country_medals <- df %>%
+    group_by(NOC) %>%
+    summarize(Total_Medals = n())
+  
+  # 获取世界地图数据
+  world <- ne_countries(scale = "medium", returnclass = "sf")
+  
+  # 检查地图数据中是否有 adm0_a3 列
+  if (!"adm0_a3" %in% colnames(world)) {
+    stop("The world map data does not have an 'adm0_a3' column for matching country codes.")
+  }
+  
+  # 将奖牌总数数据合并到世界地图数据中
+  world_data <- world %>%
+    left_join(country_medals, by = c("adm0_a3" = "NOC"))
+  
+  # 设置填充色比例，使用对数变换以便更好地展示低奖牌数
+  ggplot(data = world_data) +
+    geom_sf(aes(fill = log1p(Total_Medals)), color = "white", size = 0.1) +
+    scale_fill_gradient(
+      low = "lightyellow", 
+      high = "darkred", 
+      na.value = "gray90", 
+      name = "Total Medals (log scale)"
+    ) +
+    labs(
+      title = "Total Olympic Medals by Country (All Years)",
+      fill = "Total Medals (log scale)"
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(hjust = 0.5)
+    )
+}
+
+
+# 函数：生成热力图
+generate_heatmap_plot <- function(data) {
+  # 创建数据汇总，用于热力图
+  heatmap_data <- data %>%
+    group_by(Year, Sport) %>%
+    summarise(Athlete_Count = n(), .groups = 'drop')
+  
+  # 绘制热力图
+  ggplot(heatmap_data, aes(y = Sport, x = factor(Year), fill = Athlete_Count)) +
+    geom_tile() +
+    scale_fill_gradient(low = "lightyellow", high = "#8b212f", name = "Athlete Count") +
+    labs(title = "Athlete Participation Heatmap", x = "Year", y = "Sport") +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(size = 6, angle = , hjust = 1, vjust = 1),  # 调整x轴字体大小和倾斜角度
+      axis.text.y = element_text(size = 6,hjust = 1, vjust = 0.5),  # 调整y轴字体大小
+      plot.title = element_text(hjust = 0.5),
+      panel.grid.major = element_blank(),  # 去除主要网格线
+      panel.grid.minor = element_blank() ,
+      legend.location = 'bottom'
+    )
+}
+
+#函数：生成动态身高体重气泡图
+generate_bubble_data <- function(data, year) {
+  bubble_data <- data %>%
+    filter(Year == year) %>%
+    group_by(Sport) %>%
+    summarize(
+      median_height = median(Height, na.rm = TRUE),
+      median_weight = median(Weight, na.rm = TRUE),
+      total_athletes = n()
+    ) %>%
+    filter(!is.na(median_height) & !is.na(median_weight))
+
+  return(bubble_data)
+}
+
+
+#analysis页面
+
+# 饼图生成函数（带百分比标注，无悬浮标注）
+generate_medal_pie_chart <- function(data, country, sport, year_range, event) {
+  medal_data <- generate_medal_tableana(data, country, sport, year_range, event)
+  if (all(medal_data$Count == 0)) {
+    ggplot() + 
+      geom_text(aes(x = 1, y = 1, label = "No data"), size = 6) + 
+      theme_void() + 
+      labs(title = "Medals by Type")
+  } else {
+    medal_data <- medal_data %>%
+      mutate(Percentage = Count / sum(Count) * 100,
+             Label = paste0(Medal, ": ", round(Percentage, 1), "%"))
+    ggplot(medal_data, aes(x = "", y = Count, fill = Medal)) +
+      geom_bar(stat = "identity", width = 1, color = "white") +
+      coord_polar("y", start = 0) +
+      geom_text(aes(label = Label), position = position_stack(vjust = 0.5), size = 4) +
+      scale_fill_manual(values = c("Gold" = "gold", "Silver" = "#C0C0C0", "Bronze" = "#cd7f32")) +
+      theme_void() +
+      theme(
+        legend.position = "none",
+        plot.margin = margin(0, 0, 0, 0) # 去除外部边距
+      )
+  }
+}
+
+#------A图-------
+generate_medal_tableana <- function(df, country, sport, year_range, event) {
+  all_medals <- data.frame(
+    Medal = c("Gold", "Silver", "Bronze"), # 包括所有类型
+    stringsAsFactors = FALSE
+  )
+  
+  # 筛选给定 NOC 的数据
+  country_data <- df %>%
+    filter(NOC == country,
+           Sport %in% sport,
+           Year >= year_range[1], Year <= year_range[2],
+           Event %in% event) %>%
+    group_by(Medal) %>%
+    summarize(Count = n(), .groups = "drop")
+  
+  # 合并所有奖牌类型，确保0奖牌也显示
+  country_data <- merge(all_medals, country_data, by = "Medal", all.x = TRUE)
+  country_data[is.na(country_data)] <- 0
+  
+  # 排序表格按金银铜顺序
+  country_data <- country_data %>%
+    arrange(factor(Medal, levels = c("Gold", "Silver", "Bronze")))
+  
+  # 在表格输出中替换 Medal 列为图片，但在生成图表时不使用此替换
+  country_data$Medal_HTML <- c(
+    '<img src="https://uwmadison.box.com/shared/static/xxq2yg970incl023synduu2pwyngen0f.png" width="30"/>',
+    '<img src="https://uwmadison.box.com/shared/static/17u5wz3i2ue0an69iuygg0kov3byyw9l.png" width="30"/>',
+    '<img src="https://uwmadison.box.com/shared/static/gq21t821pt8kc19teqdmjvx2rliqhz1x.png" width="30"/>'
+  )
+  
+  return(country_data)
+}
+
+
+
+render_medal_tableana <- function(df, country, sport, year_range, event) {
+  country_data <- generate_medal_tableana(df, country, sport, year_range, event)
+  
+  # 调整字体大小和行高
+  datatable(country_data %>% select(Medal_HTML, Count), 
+            options = list(
+              dom = 't', 
+              paging = FALSE,
+              columnDefs = list(list(targets = 0, title = 'Medal')),
+              autoWidth = TRUE,
+              rowCallback = JS('function(row, data, index) {
+                                $("td", row).css("padding", "6px");
+                              }')
+            ), 
+            rownames = FALSE, 
+            escape = FALSE)
+}
+
+
+
+#------B图-------
+generate_medal_bar_chartana <- function(data, country, sport, year_range, event) {
+  filtered_data <- data %>%
+    filter(Sport %in% sport,
+           Year >= year_range[1], Year <= year_range[2],
+           Event %in% event) %>%
+    group_by(NOC, Medal) %>%
+    summarise(Count = n(), .groups = "drop")
+  
+  # 筛选出前五个国家并计算总奖牌数
+  top_countries <- filtered_data %>%
+    group_by(NOC) %>%
+    summarise(Total = sum(Count)) %>%
+    arrange(desc(Total)) %>%
+    head(5)
+  
+  # 将 NOC 列设为 factor，并根据 Total 设置顺序为从大到小
+  filtered_data <- filtered_data %>%
+    filter(NOC %in% top_countries$NOC) %>%
+    mutate(NOC = factor(NOC, levels = top_countries$NOC[order(top_countries$Total, decreasing = FALSE)])) %>%
+    arrange(NOC, Medal) # 按 NOC 顺序和 Medal 排序
+  
+  # 绘制条形图，交换 x 和 y
+  p <- ggplot(filtered_data, aes(x = Count, y = NOC, fill = Medal, text = paste("Medal:", Medal, "<br>Count:", Count, "<br>Country:", NOC))) +
+    geom_bar(stat = "identity", position = position_dodge(width = 0.7)) +
+    scale_fill_manual(values = c("Gold" = "gold", "Silver" = "#C0C0C0", "Bronze" = "#cd7f32")) +
+    labs(y = "Country", x = "Medal Count") +
+    theme_minimal() +
+    theme(
+      panel.border = element_blank(), # 移除图本身的边框
+      plot.margin = margin(0, 0, 0, 0), # 去除图的外部边距
+      axis.title.y = element_blank()
+    )
+  
+  # 使用 ggplotly 并去除边框
+  ggplotly(p, tooltip = "text")
+}
+
+
+
+
+
+#------身高图----
+
+generate_height_density_plotana <- function(data, events) {
+  # 过滤数据，保留所选 event 和 medal
+  filtered_data <- data %>%
+    filter(Event %in% events)
+  
+  # 绘制密度曲线，按 Medal 分类上色，按 Event 分组显示在 y 轴上
+  ggplot(filtered_data) +
+   geom_density_ridges(aes(x = Height, y= Event, color = Medal, fill = Medal),alpha = 0.5) +
+    scale_color_manual(values = c("Gold" = "gold", "Silver" = "#C0C0C0", "Bronze" = "#cd7f32", "No Medal" = "#8b212f")) +
+    scale_fill_manual(values = c("Gold" = "gold", "Silver" = "#C0C0C0", "Bronze" = "#cd7f32", "No Medal" = "#8b212f")) +
+    labs(#title = "Height Density by Medal and Event",
+         x = "Height (cm)") +
+    theme_minimal() +
+    theme(#legend.position = "none",
+          axis.title.y = element_blank())
+}
+
+#-----体重图---
+generate_weight_density_plotana <- function(data, events) {
+  # 过滤数据，保留所选 event 和 medal
+  filtered_data <- data %>%
+    filter(Event %in% events)
+  
+  # 绘制密度曲线，按 Medal 分类上色，按 Event 分组显示在 y 轴上
+  ggplot(filtered_data) +
+   geom_density_ridges(aes(x = Weight, y= Event, color = Medal, fill = Medal),alpha = 0.5) +
+    scale_color_manual(values = c("Gold" = "gold", "Silver" = "#C0C0C0", "Bronze" = "#cd7f32", "No Medal" = "#8b212f")) +
+    scale_fill_manual(values = c("Gold" = "gold", "Silver" = "#C0C0C0", "Bronze" = "#cd7f32", "No Medal" = "#8b212f")) +
+    labs(#title = "Weight Density by Medal and Event",
+         x = "Weight (kg)") +
+    theme_minimal() +
+    theme(#legend.position = "none",
+          axis.title.y = element_blank())
+}
+
+#-----top10 sports
+generate_top10_sports <- function(data, country, year_range, medals) {
+  filtered_data <- data %>%
+    filter(NOC == country,
+           Year >= year_range[1], Year <= year_range[2],
+           Medal %in% medals) %>%
+    group_by(Sport) %>%
+    summarise(TotalMedals = n(), .groups = "drop") %>%
+    arrange(desc(TotalMedals)) %>%
+    head(10)
+  
+  p <- ggplot(filtered_data, aes(x = TotalMedals, y = reorder(Sport, TotalMedals), text = paste("Sport:", Sport, "<br>Total Medals:", TotalMedals))) +
+    geom_bar(stat = "identity", fill = "darkred") +
+    labs( x = "Total Medals",) +
+    theme_minimal()+
+    theme(axis.title.y = element_blank())
+  
+  ggplotly(p, tooltip = "text")
+}
+
+#-----top10 athletes
+generate_top10_athletes <- function(data, country, year_range, medals) {
+  filtered_data <- data %>%
+    filter(NOC == country,
+           Year >= year_range[1], Year <= year_range[2],
+           Medal %in% medals) %>%
+    group_by(Name) %>%
+    summarise(TotalMedals = n(), .groups = "drop") %>%
+    arrange(desc(TotalMedals)) %>%
+    head(10)
+  
+  p <- ggplot(filtered_data, aes(x = TotalMedals, y = reorder(Name, TotalMedals), text = paste("Name:", Name, "<br>Total Medals:", TotalMedals))) +
+    geom_bar(stat = "identity", fill = "darkred") +
+    labs(x = "Total Medals",
+         axis.title.y = element_blank()) +
+    theme_minimal()+
+    theme( axis.text.y = element_text(size = 7),
+           axis.title.y = element_blank()
+          )# 使 y 轴标签倾斜)
+  
+  ggplotly(p, tooltip = "text")
+}
+
+#-----气泡图
+generate_bubble_chart <- function(data, year_range, country, medals, selected_sports) {
+  # 数据过滤
+  filtered_data <- data %>%
+    filter(NOC == country,
+           Year >= year_range[1], Year <= year_range[2],
+           Medal %in% medals,
+           Sport %in% selected_sports) %>%
+    group_by(Sport, Event) %>%
+    summarise(TotalMedals = n(), .groups = "drop") %>%
+    mutate(TotalMedalsAll = sum(TotalMedals),
+           MedalPercentage = (TotalMedals / TotalMedalsAll) * 100)  # 计算占比
+  
+  # 创建唯一节点数据框，并添加总奖牌和百分比
+  nodes <- filtered_data %>%
+    pivot_longer(cols = c(Sport, Event), names_to = "type", values_to = "name") %>%
+    distinct(name, .keep_all = TRUE)  # 确保节点唯一，并保留其他列
+  
+  # 创建边数据框
+  edges <- filtered_data %>%
+    select(from = Sport, to = Event)
+  
+  # 创建图形对象
+  graph <- tbl_graph(nodes = nodes, edges = edges)
+  
+  # 打印节点和边数据
+  print("节点数据:")
+  print(as_tibble(graph, what = "nodes"))  # 打印节点数据
+  
+  print("边数据:")
+  print(as_tibble(graph, what = "edges"))  # 打印边数据
+  
+  # 创建圈圈图
+  p2 <- ggraph(graph, layout = "circlepack", weight = TotalMedals) + 
+    geom_node_circle(aes(fill = type, 
+                         alpha = ifelse(type == "Sport", 0.5, 0.6)),
+                     color = NA, show.legend = FALSE) +  # 移除边框和图例
+    
+    # 颜色设置：大圈表示Sport，小圈表示Event
+    scale_fill_manual(values = c("Sport" = "lightcoral", "Event" = "darkred")) +
+    coord_fixed() +
+    
+    # 标签设置：仅在 Sport 节点上显示标签
+    geom_node_text(aes(label = ifelse(type == "Sport", name, "")),
+                   color = "white", fontface = "bold", vjust = 0.5, size = 5) +  # 静态字体大小
+   # labs(title = "Drilldown per Event") +
+    theme_void() +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    scale_size_continuous(range = c(3, 8), guide = "none")  # 禁用字体大小图例
+  
+  # 返回图形
+  return(p2)
+  
+  # 添加交互式功能
+  #p2 <- ggplotly(p2, tooltip = c("name", "TotalMedals", "MedalPercentage")) %>% 
+    #layout(dragmode = "zoom")  # 支持缩放
+  
+  # 返回图形
+  #return(p2)
+}
+
+#summarise页面
+# plot 1：生成奖牌数量表格的函数
+generate_medal_table <- function(df, country) {
+  all_medals <- data.frame(
+    Medal = c("Gold", "Silver", "Bronze"),
+    stringsAsFactors = FALSE
+  )
+  
+  # 筛选给定 NOC 的数据
+  country_data <- df %>%
+    filter(NOC == country) %>%
+    group_by(Medal) %>%
+    summarize(Count = n(), .groups = "drop")
+  
+  # 合并所有奖牌类型，确保 0 奖牌也显示
+  country_data <- merge(all_medals, country_data, by = "Medal", all.x = TRUE)
+  country_data[is.na(country_data)] <- 0
+  
+  # 确保按照金、银、铜的顺序排序
+  country_data <- country_data %>%
+    arrange(factor(Medal, levels = c("Gold", "Silver", "Bronze")))
+
+  # 将奖牌类型转换为对应的 HTML 图片标签
+country_data$Medal <- ifelse(
+  country_data$Medal == "Gold",
+  '<img src="https://uwmadison.box.com/shared/static/xxq2yg970incl023synduu2pwyngen0f.png" height="20" />',
+  ifelse(
+    country_data$Medal == "Silver",
+    '<img src="https://uwmadison.box.com/shared/static/17u5wz3i2ue0an69iuygg0kov3byyw9l.png" height="20" />',
+    ifelse(
+      country_data$Medal == "Bronze",
+      '<img src="https://uwmadison.box.com/shared/static/gq21t821pt8kc19teqdmjvx2rliqhz1x.png" height="20" />',
+      country_data$Medal
+    )
+  )
+)
+  
+  return(country_data)
+}
+
+
+# plot 2：绘制 Top 10 Sports 的横向条形图
+plot_top_10_sports <- function(df, country) {
+  top_sports <- df %>%
+    filter(NOC == country) %>%
+    group_by(Sport) %>%
+    summarize(Total_Medals = n(), .groups = 'drop') %>%
+    arrange(desc(Total_Medals)) %>%
+    head(10)
+  
+  ggplot(top_sports, aes(x = Total_Medals, y = reorder(Sport, Total_Medals))) +
+    geom_bar(stat = "identity", fill = "#8b212f") +
+    geom_text(aes(label = Total_Medals), hjust = -0.2, size = 3) +
+    theme_minimal() +
+    theme(axis.title.y = element_blank())
+}
+
+# plot 3：绘制 Top 10 Athletes 的横向条形图
+plot_top_10_athletes <- function(df, country) {
+  top_athletes <- df %>%
+    filter(NOC == country) %>%
+    group_by(Name) %>%
+    summarize(Total_Medals = n(), .groups = 'drop') %>%
+    arrange(desc(Total_Medals)) %>%
+    head(10)
+  
+  ggplot(top_athletes, aes(x = Total_Medals, y = reorder(Name, Total_Medals))) +
+    geom_bar(stat = "identity", fill = "#8b212f") +
+    geom_text(aes(label = Total_Medals), hjust = -0.2, size = 3) +
+    theme_minimal() +
+    theme(axis.title.y = element_blank())
+}
+
+#plot 4：Drawing the evolution of medals with categories-- gold, silver and bronze
+plot_evolution_medals <- function(df, country) {
+  evolution_medals <- df %>%
+    filter(NOC == country) %>%
+    group_by(Year, Medal) %>%
+    summarize(total_medal = n(), .groups = 'drop') %>%
+    mutate(total_medal = ifelse(is.na(total_medal), 0, total_medal))
+  evolution_medals[is.na(evolution_medals)] <- 0
+  
+  all_years <- expand.grid(
+    Year = unique(evolution_medals$Year),
+    Medal = c("Gold", "Silver", "Bronze")
+  )
+  medals_per_year <- all_years %>%
+    left_join(evolution_medals, by = c("Year", "Medal")) %>%
+    mutate(total_medal = ifelse(is.na(total_medal), 0, total_medal))
+  
+  ggplot(evolution_medals, aes(y = factor(Year), x = total_medal, fill = Medal)) +
+    geom_bar(stat = "identity") +
+    scale_fill_manual(values = c("Gold" = "gold", "Silver" = "#C0C0C0", "Bronze" = "#cd7f32")) +
+    theme_minimal() +
+    theme(panel.grid.major.y = element_blank(),
+          panel.grid.minor.y = element_blank())
+}
+
+#plot 5：Drawing the pie plot of medals with categories-- male and female
+plot_gender_medals <- function(df, country) {
+  gender_medals <- df %>%
+    filter(NOC == country) %>%
+    group_by(Sex) %>%
+    summarize(Count = n()) %>%
+    mutate(Count = ifelse(is.na(Count), 0, Count))
+  gender_levels <- unique(gender_medals$Sex)
+  
+  ggplot(gender_medals, aes(x = "", y = Count, fill = Sex)) +
+    geom_bar(stat = "identity", width = 1) +
+    coord_polar("y") +
+    scale_fill_manual(values = c("F" = "#cb4f70", "M" = "#3b5b98"), breaks = gender_levels) +
+    theme_void() +
+    geom_text(aes(label = paste(Sex, Count, sep = " ")),
+              position = position_stack(vjust = 0.5), color = "white")
+}
+
+
+
+```
+
+# Shiny App 
+```{r shiny_app}
+
+#第一个页面
+homeUI <- function(id) {
+  ns <- NS(id)  # 定义命名空间
+  tabPanel("Overview",
+           fluidPage(
+             titlePanel("Overview of the Olympics"),
+             
+             # 页面背景介绍
+             h3("Exploring Olympic Success Across Time and Sports", style = "font-weight: bold; margin-top: 20px;"),
+             p("This dashboard provides a comprehensive analysis of Olympic achievements, drawing on data across various sports, countries, and years. 
+               Through a series of visualizations, we investigate patterns in medal distribution, national strengths in specific sports, and the physical characteristics favored in different athletic events.
+               This page offers a broad overview, establishing a foundation for the more detailed athlete and team comparisons presented in subsequent sections."),
+             
+             # 地图图表标题和地图输出
+             h3("Global Distribution of Olympic Medals", style = "font-weight: bold; margin-top: 20px;"),
+             p("The map below illustrates the total Olympic medals earned by each country. This visualization helps identify key patterns in global participation, 
+               indicating regions with longstanding Olympic traditions and emerging areas of excellence."),
+             plotOutput(ns("worldMapPlot")),
+             
+             br(),
+             
+             # 热力图标题和热力图输出
+             h3("Medal Specialization by Sport and Country", style = "font-weight: bold; margin-top: 20px;"),
+             p("This heatmap reveals national strengths in specific sports, showing the sports where each country has most frequently medaled. By examining medal patterns, 
+               we can identify the events where particular nations have established dominance or achieved consistent success over the years."),
+             plotOutput(ns("heatmapPlot")),
+             
+             br(),
+             
+             # 气泡图标题、滑块和气泡图输出
+             h3("Physical Profiles of Athletes by Sport and Year", style = "font-weight: bold; margin-top: 20px;"),
+             p("The bubble chart below depicts the distribution of athletes' physical attributes, such as height and weight, within different sports and across Olympic years. 
+               Each bubble represents a sport in a given year, with its size proportional to the number of participating athletes, providing insights into the physical requirements of each sport."),
+             
+             # 滑块选择年份
+             sliderInput(ns("yearSlider"), "Select Year:",
+                         min = min(olympics_dataana2$Year, na.rm = TRUE),
+                         max = max(olympics_dataana2$Year, na.rm = TRUE),
+                         value = min(olympics_dataana2$Year, na.rm = TRUE),
+                         step = 4,
+                         animate = animationOptions(interval = 800, loop = TRUE)),
+             
+             # 气泡图输出
+             plotlyOutput(ns("bubblePlot"), height = "600px"),
+             
+             br(),
+             
+             # 引出后续页面内容
+             p("This overview provides a foundation for understanding the overall distribution of Olympic success and physical characteristics across sports. 
+               In the following sections, we delve deeper into comparisons of specific nations and detailed performance patterns by sport. These next pages will allow us to examine how individual countries and sports have evolved and adapted to the challenges of Olympic competition over time.")
+           )
+  )
+}
+
+homeServer <- function(id) {
+  moduleServer(id, function(input, output, session) {
+    # 生成地图的输出
+    output$worldMapPlot <- renderPlot({
+      generate_world_map(olympics_medal_data)  # 使用生成地图的函数
+    })
+    # 生成热力图的输出
+    output$heatmapPlot <- renderPlot({
+      generate_heatmap_plot(olympics_dataana)  # 调用生成热力图的函数
+    })
+    
+    
+    # 动态气泡图输出
+    output$bubblePlot <- renderPlotly({
+      year <- input$yearSlider  # 使用年份滑块输入，用于选择年份
+
+      # 调用生成气泡图数据的函数
+      bubble_data <- generate_bubble_data(olympics_dataana2, year)
+
+      # 设置颜色调色板，确保包含足够颜色
+      color_palette <- c(
+        RColorBrewer::brewer.pal(8, "Set2"),
+        RColorBrewer::brewer.pal(8, "Paired"),
+        RColorBrewer::brewer.pal(8, "Dark2"),
+        RColorBrewer::brewer.pal(12, "Set3"),
+        RColorBrewer::brewer.pal(8, "Accent")
+      )[1:length(unique(bubble_data$Sport))]  # 仅使用所需数量的颜色
+
+      # 计算 sizeref，确保其值不为 -Inf；如果 total_athletes 列没有有效数据，则使用默认值 1
+      if (nrow(bubble_data) > 0 && any(!is.na(bubble_data$total_athletes))) {
+        sizeref <- max(sqrt(bubble_data$total_athletes + 1), na.rm = TRUE) / 5
+      } else {
+        sizeref <- 1  # 使用默认参考大小
+      }
+
+      # 生成 plotly 气泡图
+      fig <- plot_ly(
+        data = bubble_data,
+        x = ~median_height, 
+        y = ~median_weight,
+        type = 'scatter', 
+        mode = 'markers',
+        color = ~Sport,
+        colors = color_palette,  # 使用更新的颜色调色板
+        marker = list(
+          sizemode = 'area',
+          sizeref = sizeref,  # 使用更新后的 sizeref
+          size = ~sqrt(total_athletes + 1)  # 使用平方根缩放
+        ),
+        text = ~paste("Sport:", Sport, "<br>Height (Median):", median_height, 
+                      "<br>Weight (Median):", median_weight, "<br>Total Athletes:", total_athletes),
+        hoverinfo = 'text'
+      ) %>%
+        layout(
+          title = paste("Sports Athletes' Height and Weight in", year),
+          xaxis = list(title = 'Median Height'),
+          yaxis = list(title = 'Median Weight'),
+          showlegend = TRUE
+        )
+
+      fig
+    })
+  })
+}
+
+#第二个页面
+
+# UI模块定义
+analysisUI <- function(id) {
+  ns <- NS(id)
+  
+  tabPanel("Analysis",
+    fluidPage(
+      class = "analysis-page",  # 给 analysis 页面指定 class
+
+      # 自定义CSS，仅作用于 analysis-page 的元素
+      tags$style(HTML("
+         body {
+      background-image: url('https://uwmadison.box.com/shared/static/4tdch5a348hgrobrhis2komfr6e6vf0l.png');
+      background-size: cover;
+      background-repeat: no-repeat;
+      background-attachment: fixed;
+      background-color: rgba(255, 255, 255, 0.5); /* 半透明背景颜色 */
+    }
+    .container-fluid {
+      background-color: rgba(255, 255, 255, 0.7); /* 设置主容器半透明 */
+      padding: 20px;
+      border-radius: 10px;
+    }
+        /* 滑块条颜色 */
+        .analysis-page .irs-bar {
+          background: #8b212f;
+          border-top: 1px solid #8b212f;
+          border-bottom: 1px solid #8b212f;
+        }
+        .analysis-page .irs-single, .analysis-page .irs-to, .analysis-page .irs-from {
+          background: #8b212f;
+        }
+        .analysis-page .irs-handle>i:first-child {
+          background: #8b212f;
+          border: none; /* 确保滑块的手柄颜色不受影响 */
+        }
+
+        /* 总标题样式 */
+        .analysis-page h1 {
+          font-size: 40px;  /* 标题字体变大 */
+          font-weight: bold;
+          text-align: center;
+        }
+
+        /* 图表标题样式 */
+        .plot-title {
+          font-size: 18px;
+          font-weight: bold;
+          text-align: center;
+          margin-bottom: 5px;  /* 标题和图表之间的间距 */
+        }
+
+        /* 图表、滑块和下拉菜单的边框和阴影 */
+        .plot-container {
+          border: 2px solid #ccc;
+          border-radius: 5px;
+          box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.2);  /* 增加阴影效果 */
+          padding: 10px;
+          margin-bottom: 0;
+          background-color: #fff;
+        }
+        
+        /* 下拉菜单的边框和阴影 */
+        .analysis-page .form-control {
+          box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.2);
+          border-radius: 5px;
+        }
+        
+        /* Checkbox 样式 */
+        .analysis-page .checkbox input[type='checkbox'] + label {
+          color: #8b212f;
+        }
+        .analysis-page .checkbox input[type='checkbox']:checked + label {
+          background-color: #8b212f;
+          color: white;
+          border-radius: 3px;
+          padding: 2px 4px;
+        }
+        .analysis-page .checkbox input[type='checkbox']:checked {
+  accent-color: #8b212f; /* 将勾选框颜色修改为红色 */
+}
+        
+      ")),
+
+
+      # 第一行：标题和右侧奥运五环图
+      fluidRow(
+        column(10,  
+               titlePanel("Analysis  of Olympics Teams")  # 标题
+        ),
+        column(2,  
+               tags$img(src = "https://uwmadison.box.com/shared/static/lhoy87xccoslkugrsta6f65uyqxh5209.png", 
+                        height = "100px", align = "right")
+        )
+      ),
+      
+       fluidRow(
+        column(12,
+               tags$h3("Olympic Medal Insights", style = "text-align: center; font-size: 24px;"),
+               tags$p("Explore comprehensive visualizations and analyses of Olympic medal data across countries, sports, and years.", 
+                      style = "text-align: center; font-size: 16px;")
+        )
+      ),
+
+      # 输入控件横向排列在一个 fluidRow 中
+      # 页面顶部留白
+      br(), br(),
+
+      # 输入控件横向排列在一个 fluidRow 中
+      fluidRow(
+        column(4, div(class = "plot-container",
+                      sliderInput(ns("year"), "Select Year:", 
+                                  min = min(olympics_dataana$Year, na.rm = TRUE), 
+                                  max = max(olympics_dataana$Year, na.rm = TRUE), 
+                                  value = c(min(olympics_dataana$Year, na.rm = TRUE),
+                                            max(olympics_dataana$Year, na.rm = TRUE)),
+                                  step = 1, sep = "")
+        )),
+        column(4, div(class = "plot-container",
+                      selectInput(ns("country"), "Select Country:", 
+                                  choices = sort(unique(olympics_dataana$NOC)), selected = 'USA')
+        )),
+        column(4, div(class = "plot-container",
+                      checkboxGroupInput(ns("medal"), "Select Medals:", 
+                                         choices = c("Gold", "Silver", "Bronze"), 
+                                         selected = c("Gold", "Silver", "Bronze"))
+        ))
+      ),
+
+      # 第二行：Sport 和 Event 并排选择
+      fluidRow(
+        column(6, div(class = "plot-container",
+                      selectizeInput(ns("sport"), "Select Sport(s):", 
+                                     choices = sort(unique(olympics_dataana$Sport)), 
+                                     selected = 'Swimming', multiple = TRUE)
+        )),
+        column(6, div(class = "plot-container",
+                      selectizeInput(ns("event"), "Select Event(s):", 
+                                     choices = NULL, selected = "All", multiple = TRUE)
+        ))
+      ),
+
+      # 表格和饼图在左边，条形图在右边
+fluidRow(
+  column(4, 
+         div(class = "plot-container", style = "height: 220px; overflow-y: auto;",  # 调整容器高度和滚动条
+             tags$div("Country Medal Table", class = "plot-title", style = "font-size: 16px; text-align: center;"),  # 添加标题并居中
+             div(style = "display: flex; justify-content: center; height: 250px;",  # 设置表格容器高度
+                 dataTableOutput(ns('countrymedaldt'))  # 表格输出
+             )
+         ),
+         div(class = "plot-container", style = "height: 400px;",  # 调整饼图的容器高度
+             tags$div("Medals by Type", class = "plot-title", style = "font-size: 16px; text-align: center;"),  # 添加标题
+             plotOutput(ns("medalPieChart"))  # 饼图输出
+         )
+  ),
+  column(8, div(class = "plot-container", style = "height: 620px;",  # 设置条形图容器高度与其他一致
+                tags$div("Top 5 Countries by Medal Count", class = "plot-title", style = "font-size: 16px; text-align: center;"),  # 添加标题
+                plotlyOutput(ns("medalBarChart"))  # 条形图输出
+  ))
+),
+
+
+      # 身高和体重图并排排列
+      fluidRow(
+        column(6, div(class = "plot-container",
+                      tags$div('Height Density by Medal and Event',class = "plot-title", style = "font-size: 16px; text-align: center;"),
+                      plotOutput(ns("height"))  # 身高密度图
+        )),
+        column(6, div(class = "plot-container",
+                      tags$div('Weight Density by Medal and Event',class = "plot-title", style = "font-size: 16px; text-align: center;"),
+                      plotOutput(ns("weight"))  # 体重密度图
+        ))
+      ),
+
+      # top10 sports & athlete图并排排列
+      fluidRow(
+        column(6, div(class = "plot-container",
+                      tags$div('Top 10 Sports by Medal Count',class = "plot-title", style = "font-size: 16px; text-align: center;"),
+                      plotlyOutput(ns("top10Sports"))  # Top 10 Sports 图
+        )),
+        column(6, div(class = "plot-container",
+                      tags$div('Top 10 Athletes by Medal Count',class = "plot-title", style = "font-size: 16px; text-align: center;"),
+                      plotlyOutput(ns("top10Athletes"))  # Top 10 Athletes 图
+        ))
+      ),
+
+      # 气泡图
+      fluidRow(
+        column(12, div(class = "plot-container",
+                       tags$div("Drilldown per Event",class = "plot-title", style = "font-size: 16px; text-align: center;"),
+                       plotOutput(ns("bubbleChart"))  # 气泡图输出
+        ))
+      )
+    )
+  )
+}
+
+# 服务器模块定义
+analysisServer <- function(id) {
+  moduleServer(id, function(input, output, session) {
+    
+    # 更新 Event 下拉菜单，并添加 "All" 选项
+    observeEvent(input$sport, {
+      event_choices <- olympics_dataana %>%
+        filter(Sport %in% input$sport) %>%
+        distinct(Event) %>%
+        pull(Event)
+      
+      updateSelectizeInput(session, "event", choices = c("All", event_choices), selected = "All")
+    })
+    
+    # 获取用户选择的 Event
+    selected_events <- reactive({
+      if ("All" %in% input$event) {
+        olympics_dataana %>%
+          filter(Sport %in% input$sport) %>%
+          distinct(Event) %>%
+          pull(Event)
+      } else {
+        input$event
+      }
+    })
+    
+    # DataTable 显示国家奖牌数据
+    output$countrymedaldt <- renderDataTable({
+      req(input$country, input$sport, input$year)
+      render_medal_tableana(olympics_dataana, input$country, input$sport, input$year, selected_events())
+    })
+    
+    # 奖牌 Bar Chart
+    output$medalBarChart <- renderPlotly({
+      req(input$country, input$sport, input$year)
+      filtered_data <- olympics_dataana %>%
+        filter(Sport %in% input$sport, Year >= input$year[1], Year <= input$year[2], Event %in% selected_events())
+      
+      if (nrow(filtered_data) == 0) {
+        ggplotly(ggplot() + geom_text(aes(x = 1, y = 1, label = "No data available"), size = 6) + theme_void())
+      } else {
+        ggplotly(generate_medal_bar_chartana(olympics_dataana, input$country, input$sport, input$year, selected_events()), tooltip = "text")
+      }
+    })
+    
+    output$medalPieChart <- renderPlot({
+      req(input$country, input$sport, input$year)
+      generate_medal_pie_chart(olympics_dataana, input$country, input$sport, input$year, selected_events())
+    })
+    
+    # 身高密度图
+    output$height <- renderPlot({
+      req(input$event)
+      filtered_data <- olympics_dataana2 %>%
+        filter(Event %in% selected_events())
+      
+      if (nrow(filtered_data) == 0 || all(is.na(filtered_data$Height))) {
+        ggplot() + geom_text(aes(x = 1, y = 1, label = "No data available"), size = 6) + theme_void()
+      } else {
+        generate_height_density_plotana(olympics_dataana2, selected_events())
+      }
+    })
+    
+    # 体重密度图
+    output$weight <- renderPlot({
+      req(input$event)
+      filtered_data <- olympics_dataana2 %>%
+        filter(Event %in% selected_events())
+      
+      if (nrow(filtered_data) == 0 || all(is.na(filtered_data$Weight))) {
+        ggplot() + geom_text(aes(x = 1, y = 1, label = "No data available"), size = 6) + theme_void()
+      } else {
+        generate_weight_density_plotana(olympics_dataana2, selected_events())
+      }
+    })
+    
+     # Top 10 Sports 图表
+  output$top10Sports <- renderPlotly({
+    req(input$country, input$year, input$medal)
+    generate_top10_sports(olympics_dataana, input$country, input$year, input$medal)
+  })
+  
+  # Top 10 Athletes 图表
+  output$top10Athletes <- renderPlotly({
+    req(input$country, input$year, input$medal)
+    generate_top10_athletes(olympics_dataana2, input$country, input$year, input$medal)
+  })
+  
+  # Drilldown per Event 气泡图
+  output$bubbleChart <- renderPlot({
+    req(input$year, input$country, input$medal, input$sport)
+    generate_bubble_chart(olympics_dataana, input$year, input$country, input$medal, input$sport)
+  })
+  
+  
+  # 处理点击事件联动更新
+  observeEvent(event_data("plotly_click", source = "top10Sports"), {
+    click_data <- event_data("plotly_click", source = "top10Sports")
+    if (!is.null(click_data)) {
+      selected_sport <- click_data[["y"]]
+      updateSelectizeInput(session, "sport", selected = selected_sport)
+    }
+  })
+  
+  observeEvent(event_data("plotly_click", source = "top10Athletes"), {
+    click_data <- event_data("plotly_click", source = "top10Athletes")
+    if (!is.null(click_data)) {
+      selected_athlete <- click_data[["y"]]
+      updateSelectizeInput(session, "athlete", selected = selected_athlete)
+    }
+  })
+  
+})
+}
+
+
+#第三个页面
+comparisonUI <- function(id) {
+  ns <- NS(id)
+  
+  tabPanel("Comparison",
+    fluidPage(
+      class = "comparison-page",  # 给Comparison页面指定class
+
+      # 自定义CSS，仅作用于comparison-page的滑块、下拉菜单和图表
+      tags$style(HTML("
+        /* 滑块条颜色 */
+        .comparison-page .irs-bar {
+          background: #8b212f;
+          border-top: 1px solid #8b212f;
+          border-bottom: 1px solid #8b212f;
+        }
+        .comparison-page .irs-single, .comparison-page .irs-to, .comparison-page .irs-from {
+          background: #8b212f;
+        }
+        .comparison-page .irs-handle>i:first-child {
+          background: #8b212f;
+          border: none; /* 确保滑块的手柄颜色不受影响 */
+        }
+
+        /* 总标题样式 */
+        .comparison-page h1 {
+          font-size: 40px;  /* 标题字体变大 */
+          font-weight: bold;
+          text-align: center;
+        }
+
+        /* 图表标题样式 */
+        .plot-title {
+          font-size: 18px;
+          font-weight: bold;
+          text-align: center;
+          margin-bottom: 10px;  /* 标题和图表之间的间距 */
+        }
+
+        /* 图表、滑块和下拉菜单的边框和阴影 */
+        .plot-container {
+          border: 2px solid #ccc;
+          border-radius: 5px;
+          box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.2);  /* 增加阴影效果 */
+          padding: 10px;
+          margin-bottom: 20px;
+          background-color: #fff;
+        }
+        
+        /* 下拉菜单的边框和阴影 */
+        .comparison-page .form-control {
+          border: 1px solid #8b212f;
+          box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.2);
+          border-radius: 5px;
+        }
+      ")),
+
+      # 第一行：标题和右侧图片
+      fluidRow(
+        column(10,  
+               titlePanel("Compare Olympic Teams")  # 标题
+        ),
+        column(2,  
+               tags$img(src = "https://uwmadison.box.com/shared/static/lhoy87xccoslkugrsta6f65uyqxh5209.png", 
+                        height = "100px", align = "right")
+        )
+      ),
+
+      # 第二行：居中的文本描述
+      fluidRow(
+        column(12,
+               tags$h3("Compare your favorite Olympics Teams!", style = "text-align: center; font-size: 24px;"),
+               tags$p("Select your favorite Olympics teams and see how their medal count compares to others in the Summer Olympics!", 
+                      style = "text-align: center; font-size: 16px;")
+        )
+      ),
+
+      br(),
+
+      # 第三行：年份滑块，运动项目，和事件选择
+      fluidRow(
+        column(4,
+               div(class = "plot-container",
+                   sliderInput(ns("yearRange"), "Select Year Range:",
+                               min = min(olympics_medal_data$Year), 
+                               max = max(olympics_medal_data$Year),
+                               value = c(min(olympics_medal_data$Year), max(olympics_medal_data$Year)),
+                               step = 4,
+                               sep = "")
+               )
+        ),
+        column(4,
+               div(class = "plot-container",
+                   selectInput(ns("sport"), "Select Sport:", 
+                               choices = c("All", sort(unique(olympics_medal_data$Sport))),  
+                               selected = "All",  
+                               multiple = FALSE)
+               )
+        ),
+        column(4,
+               div(class = "plot-container",
+                   selectInput(ns("event"), "Select Event:", 
+                               choices = "All",  
+                               multiple = FALSE)
+               )
+        )
+      ),
+
+      br(),
+
+      # 第四行：国家选择 A 和 B
+      fluidRow(
+        column(6,
+               div(class = "plot-container",
+                   selectInput(ns("countryA"), "Select Country A:", 
+                               choices = sort(unique(olympics_medal_data$NOC)),
+                               selected = "CHN", 
+                               multiple = FALSE)
+               )
+        ),
+        column(6,
+               div(class = "plot-container",
+                   selectInput(ns("countryB"), "Select Country B:", 
+                               choices = sort(unique(olympics_medal_data$NOC)),
+                               selected = "GBR", 
+                               multiple = FALSE)
+               )
+        )
+      ),
+
+      # 第五行：居中显示两个国家的奖牌统计表
+      fluidRow(
+        column(6, div(class = "plot-container",
+                      tags$div("Country A Medal Table", class = "plot-title"),
+                      div(style = "display: flex; justify-content: center;",
+                          tableOutput(ns("countryATable"))
+                      )
+        )),
+        column(6, div(class = "plot-container",
+                      tags$div("Country B Medal Table", class = "plot-title"),
+                      div(style = "display: flex; justify-content: center;",
+                          tableOutput(ns("countryBTable"))
+                      )
+        ))
+      ),
+
+      # 第六行：两个国家的 Top 10 Sports 图
+      fluidRow(
+        column(6, div(class = "plot-container",
+                      tags$div("Top 10 Sports for Country A", class = "plot-title"),
+                      plotOutput(ns("top10SportsA"))
+        )),
+        column(6, div(class = "plot-container",
+                      tags$div("Top 10 Sports for Country B", class = "plot-title"),
+                      plotOutput(ns("top10SportsB"))
+        ))
+      ),
+
+      # 第七行：两个国家的 Top 10 Athletes 图
+      fluidRow(
+        column(6, div(class = "plot-container",
+                      tags$div("Top 10 Athletes for Country A", class = "plot-title"),
+                      plotOutput(ns("top10AthletesA"))
+        )),
+        column(6, div(class = "plot-container",
+                      tags$div("Top 10 Athletes for Country B", class = "plot-title"),
+                      plotOutput(ns("top10AthletesB"))
+        ))
+      ),
+
+      # 第八行：两个国家的 Medal Evolution 图
+      fluidRow(
+        column(6, div(class = "plot-container",
+                      tags$div("Medal Evolution for Country A", class = "plot-title"),
+                      plotOutput(ns("evolution_medal_A"))
+        )),
+        column(6, div(class = "plot-container",
+                      tags$div("Medal Evolution for Country B", class = "plot-title"),
+                      plotOutput(ns("evolution_medal_B"))
+        ))
+      ),
+
+      # 第九行：两个国家的 Gender Medal 图
+      fluidRow(
+        column(6, div(class = "plot-container",
+                      tags$div("Gender Medal Distribution for Country A", class = "plot-title"),
+                      plotOutput(ns("gender_medal_A"))
+        )),
+        column(6, div(class = "plot-container",
+                      tags$div("Gender Medal Distribution for Country B", class = "plot-title"),
+                      plotOutput(ns("gender_medal_B"))
+        ))
+      )
+    )
+  )
+}
+
+
+comparisonServer <- function(id) {
+  moduleServer(id, function(input, output, session) {
+    ns <- session$ns
+    
+    # 动态更新 event 下拉菜单的选项，基于选择的 sport，并添加 'All' 选项
+    observe({
+      selected_sport <- input$sport
+      if (!is.null(selected_sport) && selected_sport != "" && selected_sport != "All") {
+        filtered_events <- sort(unique(olympics_medal_data$Event[olympics_medal_data$Sport == selected_sport]))
+        updateSelectInput(session, "event", choices = c("All", filtered_events))
+      } else {
+        updateSelectInput(session, "event", choices = "All")
+      }
+    })
+    
+    # 奖牌数量表格的过滤器
+    filtered_data_for_table <- reactive({
+      data <- olympics_medal_data
+      data <- data %>%
+        filter(Year >= input$yearRange[1], Year <= input$yearRange[2])
+      
+      if (input$sport != "All") {
+        data <- data %>% filter(Sport == input$sport)
+      }
+      
+      if (input$event != "All") {
+        data <- data %>% filter(Event == input$event)
+      }
+      
+      data
+    })
+    
+    # 生成奖牌数量的表格（国家A）
+    output$countryATable <- renderTable({
+      generate_medal_table(filtered_data_for_table(), input$countryA)
+    }, sanitize.text.function = identity)
+    
+    # 生成奖牌数量的表格（国家B）
+    output$countryBTable <- renderTable({
+      generate_medal_table(filtered_data_for_table(), input$countryB)
+    }, sanitize.text.function = identity)
+    
+    # Top 10 Sports 的过滤器
+    filtered_data_for_plot <- reactive({
+      data <- olympics_medal_data
+      data <- data %>%
+        filter(Year >= input$yearRange[1], Year <= input$yearRange[2])
+      
+      if (input$sport != "All") {
+        data <- data %>% filter(Sport == input$sport)
+      }
+      
+      data
+    })
+    
+    # 绘制国家A的Top 10 Sports条形图
+    output$top10SportsA <- renderPlot({
+      plot_top_10_sports(filtered_data_for_plot(), input$countryA)  
+    })
+    
+    # 绘制国家B的Top 10 Sports条形图
+    output$top10SportsB <- renderPlot({
+      plot_top_10_sports(filtered_data_for_plot(), input$countryB)  
+    })
+    
+    # Top 10 Athletes 的过滤器
+    filtered_data_for_athletes <- reactive({
+      data <- olympics_data
+      data <- data %>%
+        filter(Year >= input$yearRange[1], Year <= input$yearRange[2])
+      
+      if (input$sport != "All") {
+        data <- data %>% filter(Sport == input$sport)
+      }
+      
+      data
+    })
+    
+    # 绘制国家A的Top 10 Athletes条形图
+    output$top10AthletesA <- renderPlot({
+      plot_top_10_athletes(filtered_data_for_athletes(), input$countryA)  
+    })
+    
+    # 绘制国家B的Top 10 Athletes条形图
+    output$top10AthletesB <- renderPlot({
+      plot_top_10_athletes(filtered_data_for_athletes(), input$countryB)  
+    })
+    
+    # 绘制国家A的 Medal Evolution 图
+    output$evolution_medal_A <- renderPlot({
+      plot_evolution_medals(filtered_data_for_table(), input$countryA)  
+    })
+    
+    # 绘制国家B的 Medal Evolution 图
+    output$evolution_medal_B <- renderPlot({
+      plot_evolution_medals(filtered_data_for_table(), input$countryB)  
+    })
+    
+    # 绘制国家A的 Gender Medal 图
+    output$gender_medal_A <- renderPlot({
+      plot_gender_medals(filtered_data_for_table(), input$countryA)  
+    })
+    
+    # 绘制国家B的 Gender Medal 图
+    output$gender_medal_B <- renderPlot({
+      plot_gender_medals(filtered_data_for_table(), input$countryB)  
+    })
+  })
+}
+
+
+ui <- navbarPage("Olympic Insights",  
+  homeUI("home"),
+  analysisUI("analysis"),
+  comparisonUI("comparison")
+)
+
+server <- function(input, output, session) {
+  homeServer("home")
+  analysisServer("analysis")
+  comparisonServer("comparison")
+}
+
+shinyApp(ui = ui, server = server)
+
+```
+
